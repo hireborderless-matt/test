@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Floating Gold AirPods</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+    </style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<!-- Import map for Three.js -->
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+</script>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // --- CONFIGURATION ---
+    const OBJ_COUNT = 9;         
+    const OBJ_SCALE = 30.0;       
+    const PUSH_STRENGTH = 0.02;
+    const FRICTION = 0.9;
+
+    // --- HITBOX TUNING ---
+    // 1.0 = Perfect bounding sphere (creates gaps for L-shapes)
+    // 0.6 - 0.75 = Best for irregular shapes. Allows stems to overlap slightly
+    //              so the main bodies can touch.
+    const HITBOX_SCALE = 0.65; 
+    
+    // Set to TRUE to see the red wireframe spheres
+    const DEBUG_HITBOX = false; 
+    
+    const ENV_MAP_URL = 'https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/kandao3.jpg';
+    const MODEL_URL = 'https://raw.githubusercontent.com/hireborderless-matt/test/9c3a045c14d872f74a410ce7f0369cf20cfdc8ad/airpods.glb';
+
+    // Setup Scene
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+    camera.position.z = 30; 
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    container.appendChild(renderer.domElement);
+
+    // Lighting
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.load(ENV_MAP_URL, function (texture) {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        scene.environment = texture; 
+        scene.background = new THREE.Color('#111'); 
+    });
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+    dirLight.position.set(5, 5, 10);
+    scene.add(dirLight);
+
+    const goldMaterial = new THREE.MeshPhysicalMaterial({
+        color: 0xffd700,
+        metalness: 1.0,
+        roughness: 0.15,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        envMapIntensity: 1.0
+    });
+
+    const objects = [];
+    let mouse = { x: -9999, y: -9999 };
+    let targetMouse = new THREE.Vector3();
+    let worldWidth = 20;
+    let worldHeight = 10;
+
+    // --- MODEL LOADING ---
+    const gltfLoader = new GLTFLoader();
+    
+    gltfLoader.load(MODEL_URL, (gltf) => {
+        
+        const rawModel = gltf.scene;
+        
+        rawModel.traverse((child) => {
+            if (child.isMesh) child.material = goldMaterial;
+        });
+        
+        rawModel.scale.set(OBJ_SCALE, OBJ_SCALE, OBJ_SCALE);
+
+        // Centering Logic
+        const box = new THREE.Box3().setFromObject(rawModel);
+        const center = box.getCenter(new THREE.Vector3());
+        rawModel.position.sub(center);
+
+        const wrapper = new THREE.Group();
+        wrapper.add(rawModel);
+
+        // --- CALCULATE HITBOX ---
+        const sphere = new THREE.Sphere();
+        box.getBoundingSphere(sphere);
+        
+        // HERE IS WHERE WE SHRINK IT
+        // We take the mathematical radius and multiply it by our scale factor
+        const tightRadius = sphere.radius * HITBOX_SCALE; 
+
+        createObjects(wrapper, tightRadius);
+        updateBoundaries();
+        animate();
+    });
+
+    function createObjects(modelWrapper, radius) {
+        for (let i = 0; i < OBJ_COUNT; i++) {
+            const instance = modelWrapper.clone();
+
+            instance.position.set(
+                (Math.random() - 0.5) * 10,
+                (Math.random() - 0.5) * 5,
+                0 
+            );
+            instance.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, 0);
+
+            instance.userData = {
+                velocity: new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.1,
+                    (Math.random() - 0.5) * 0.1,
+                    0
+                ),
+                rotSpeed: {
+                    x: (Math.random() - 0.5) * 0.02,
+                    y: (Math.random() - 0.5) * 0.02
+                },
+                radius: radius
+            };
+
+            // Visual Debugger
+            if (DEBUG_HITBOX) {
+                const geo = new THREE.SphereGeometry(radius, 16, 16);
+                const mat = new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true });
+                const wireframe = new THREE.Mesh(geo, mat);
+                instance.add(wireframe); 
+            }
+
+            scene.add(instance);
+            objects.push(instance);
+        }
+    }
+
+    // --- PHYSICS LOOP ---
+    document.addEventListener('mousemove', (event) => {
+        const x = (event.clientX / window.innerWidth) * 2 - 1;
+        const y = -(event.clientY / window.innerHeight) * 2 + 1;
+        const vector = new THREE.Vector3(x, y, 0.5);
+        vector.unproject(camera);
+        const dir = vector.sub(camera.position).normalize();
+        const distance = -camera.position.z / dir.z;
+        targetMouse.copy(camera.position.clone().add(dir.multiplyScalar(distance)));
+    });
+
+    function updateBoundaries() {
+        const dist = camera.position.z;
+        const vFOV = THREE.MathUtils.degToRad(camera.fov);
+        const height = 2 * Math.tan(vFOV / 2) * dist;
+        const width = height * camera.aspect;
+        worldHeight = height / 2;
+        worldWidth = width / 2;
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        objects.forEach(obj => {
+            const r = obj.userData.radius; 
+
+            obj.position.add(obj.userData.velocity);
+            obj.rotation.x += obj.userData.rotSpeed.x;
+            obj.rotation.y += obj.userData.rotSpeed.y;
+
+            // Wall Bounces (Account for shrank radius to prevent clipping out of world)
+            // We add a small buffer (1.0) here because we shrank the hitbox,
+            // so we want to bounce a little earlier than the hitbox touches the wall
+            const wallBuffer = 1.5; 
+
+            if (obj.position.x > worldWidth - r * wallBuffer) {
+                obj.position.x = worldWidth - r * wallBuffer;
+                obj.userData.velocity.x *= -1;
+            }
+            if (obj.position.x < -worldWidth + r * wallBuffer) {
+                obj.position.x = -worldWidth + r * wallBuffer;
+                obj.userData.velocity.x *= -1;
+            }
+            if (obj.position.y > worldHeight - r * wallBuffer) {
+                obj.position.y = worldHeight - r * wallBuffer;
+                obj.userData.velocity.y *= -1;
+            }
+            if (obj.position.y < -worldHeight + r * wallBuffer) {
+                obj.position.y = -worldHeight + r * wallBuffer;
+                obj.userData.velocity.y *= -1;
+            }
+
+            // Mouse Interaction
+            const dx = obj.position.x - targetMouse.x;
+            const dy = obj.position.y - targetMouse.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            // Push radius needs to be bigger than collision radius for good feel
+            if (dist < r + 3) {
+                const force = ((r + 3) - dist) * PUSH_STRENGTH;
+                const angle = Math.atan2(dy, dx);
+                obj.userData.velocity.x += Math.cos(angle) * force;
+                obj.userData.velocity.y += Math.sin(angle) * force;
+            }
+            
+            obj.userData.velocity.multiplyScalar(FRICTION);
+        });
+
+        resolveCollisions();
+        renderer.render(scene, camera);
+    }
+
+    function resolveCollisions() {
+        for (let i = 0; i < objects.length; i++) {
+            for (let j = i + 1; j < objects.length; j++) {
+                const obj1 = objects[i];
+                const obj2 = objects[j];
+
+                const dx = obj2.position.x - obj1.position.x;
+                const dy = obj2.position.y - obj1.position.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // Use tight radius. NO PADDING.
+                const minDist = obj1.userData.radius + obj2.userData.radius;
+
+                if (dist < minDist) {
+                    const angle = Math.atan2(dy, dx);
+                    const overlap = minDist - dist;
+                    const force = 0.05; 
+
+                    const moveX = Math.cos(angle) * overlap * 0.5;
+                    const moveY = Math.sin(angle) * overlap * 0.5;
+                    
+                    obj1.position.x -= moveX;
+                    obj1.position.y -= moveY;
+                    obj2.position.x += moveX;
+                    obj2.position.y += moveY;
+
+                    obj1.userData.velocity.x -= Math.cos(angle) * force;
+                    obj1.userData.velocity.y -= Math.sin(angle) * force;
+                    obj2.userData.velocity.x += Math.cos(angle) * force;
+                    obj2.userData.velocity.y += Math.sin(angle) * force;
+                }
+            }
+        }
+    }
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        updateBoundaries();
+    });
+</script>
+</body>
+</html>
